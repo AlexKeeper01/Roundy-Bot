@@ -1,92 +1,124 @@
 import os
-import uuid
-import requests
-import moviepy.editor as mp
-from telebot.async_telebot import AsyncTeleBot
-from telebot import types
+import subprocess
+import telebot
 
-API_TOKEN = "7794555956:AAHMWRWcEbzPNjjxGdHm3tl6gtMwSv4I_PA"
-bot = AsyncTeleBot(API_TOKEN)
+# Укажите ваш токен Telegram бота
+API_TOKEN = '7794555956:AAHMWRWcEbzPNjjxGdHm3tl6gtMwSv4I_PA'
 
-TEMP_FOLDER = 'temp_files'
-if not os.path.exists(TEMP_FOLDER):
-    os.makedirs(TEMP_FOLDER)
+# Путь к ffmpeg
+FFMPEG_PATH = r'E:\ffmpeg-7.1-full_build\bin\ffmpeg.exe'  # Замените на свой путь
 
-async def make_round_video(input_video_path, output_video_path, max_size_mb=1.5, max_duration=60):
-    video_clip = mp.VideoFileClip(input_video_path)
+# Создаем объект бота
+bot = telebot.TeleBot(API_TOKEN)
 
-    if video_clip.duration > max_duration:
-        video_clip = video_clip.subclip(0, max_duration)
+# Максимальные параметры для видео
+MAX_SIZE_MB = 1.5  # Максимальный размер видео в мегабайтах
+MAX_DURATION = 59  # Максимальная продолжительность видео в секундах
 
-    current_resolution = video_clip.size[1]
-    temp_output_path = os.path.join(TEMP_FOLDER, f"temp_video_{str(uuid.uuid4())}.mp4")
+# Путь к папке для временных файлов
+TEMP_FILES_DIR = os.path.join(os.path.dirname(__file__), 'temp_files')
 
-
-    while True:
-        video_duration = video_clip.duration
-        target_bitrate = int((max_size_mb * 1024 * 1024 * 8) / video_duration)
+# Убедимся, что папка для временных файлов существует
+if not os.path.exists(TEMP_FILES_DIR):
+    os.makedirs(TEMP_FILES_DIR)
 
 
-        video_clip.write_videofile(temp_output_path, codec="libx264", audio_codec='aac', bitrate=f"{target_bitrate}k",
-                                   fps=25, threads=4)
+def get_video_duration(input_video_path):
+    """Получаем длительность видео с помощью ffmpeg"""
+    try:
+        # Запускаем ffmpeg для получения метаданных
+        result = subprocess.run([FFMPEG_PATH, '-i', input_video_path], stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        output = result.stderr.decode()
 
-        video_size_mb = os.path.getsize(temp_output_path) / (1024 * 1024)
-        if video_size_mb <= max_size_mb:
-            break
-        elif current_resolution > 320:
-            current_resolution -= 100
-            video_clip = video_clip.resize(height=current_resolution)
-        else:
-            break
+        # Ищем строку с информацией о длительности
+        for line in output.split('\n'):
+            if 'Duration' in line:
+                # Извлекаем длительность в формате hh:mm:ss.xx
+                duration_str = line.split('Duration:')[1].split(',')[0].strip()
 
-    width, height = video_clip.size
-    min_size = min(width, height)
-    video_clip = video_clip.crop(
-        x1=(width - min_size) / 2, y1=(height - min_size) / 2,
-        x2=(width + min_size) / 2, y2=(height + min_size) / 2
-    )
+                # Преобразуем в часы, минуты и секунды
+                hours, minutes, seconds = map(float, duration_str.split(':'))
+                return hours * 3600 + minutes * 60 + seconds
+    except Exception as e:
+        print(f"Ошибка при получении длительности: {e}")
+    return 0
 
-    video_clip.write_videofile(output_video_path, codec="libx264", audio_codec='aac', fps=25, threads=4)
-    video_clip.close()
-    os.remove(temp_output_path)
+
+def get_video_size(input_video_path):
+    """Получаем размер видео в мегабайтах"""
+    return os.path.getsize(input_video_path) / (1024 * 1024)  # Размер в МБ
+
+
+def compress_video(input_video_path, output_video_path, max_size_mb=MAX_SIZE_MB):
+    """Сжимаем видео, если его размер больше max_size_mb"""
+    video_size = get_video_size(input_video_path)
+    if video_size > max_size_mb:
+        print(f"Видео слишком большое: {video_size:.2f} MB. Преобразование...")
+        compressed_video_path = output_video_path.replace('.mp4', '_compressed.mp4')
+        # Команда для сжатия видео
+        subprocess.run([FFMPEG_PATH, '-i', input_video_path, '-vcodec', 'libx264', '-crf', '28', compressed_video_path])
+        return compressed_video_path
     return output_video_path
 
-@bot.message_handler(commands=['start', 'help'])
-async def send_welcome(message: types.Message):
-    await bot.send_message(message.chat.id, "Привет! Отправьте мне видео, и я верну его в виде видеосообщения.")
+
+def convert_video(input_video_path, output_video_path):
+    """Преобразование видео в формат для видеосообщения в Telegram"""
+    # Получаем длительность видео
+    video_duration = get_video_duration(input_video_path)
+    temp_trimmed_path = input_video_path.replace('.mp4', '_trimmed.mp4')
+
+    if video_duration > MAX_DURATION:
+        # Обрезаем видео до MAX_DURATION и сохраняем в временный файл
+        subprocess.run(
+            [FFMPEG_PATH, '-i', input_video_path, '-t', str(MAX_DURATION), '-c', 'copy', '-y', temp_trimmed_path])
+        input_video_path = temp_trimmed_path  # Используем обрезанное видео для дальнейших шагов
+
+    # Преобразуем видео в нужный формат и делаем его квадратным
+    # Видео будет квадратным с центровкой
+    subprocess.run([FFMPEG_PATH, '-i', input_video_path,
+                    '-vf', 'scale=320:320:force_original_aspect_ratio=increase,crop=320:320',
+                    '-vcodec', 'libx264', '-acodec', 'aac', '-y', output_video_path])
+
+    # Удаляем временный файл, если он был создан
+    if os.path.exists(temp_trimmed_path):
+        os.remove(temp_trimmed_path)
+
+    # После преобразования сжимаем видео, если оно слишком большое
+    return compress_video(output_video_path, output_video_path)
+
 
 @bot.message_handler(content_types=['video'])
-async def handle_video(message: types.Message):
-    await bot.send_message(message.chat.id, "Видео получено. Начинаю обработку...\nЭто займет некоторое время.")
+def handle_video(message):
+    try:
+        # Получаем информацию о видео
+        file_info = bot.get_file(message.video.file_id)
+        input_video_path = os.path.join(TEMP_FILES_DIR, f"{file_info.file_id}.mp4")
+        print(f"Получено видео, путь: {input_video_path}")
 
-    video_file = await bot.get_file(message.video.file_id)
-    video_path = video_file.file_path
-    video_url = f"https://api.telegram.org/file/bot{bot.token}/{video_path}"
-    video_data = requests.get(video_url)
+        # Загружаем видео
+        downloaded_file = bot.download_file(file_info.file_path)
+        with open(input_video_path, 'wb') as new_file:
+            new_file.write(downloaded_file)
 
-    unique_name = str(uuid.uuid4())
-    input_video_path = os.path.join(TEMP_FOLDER, f"input_video_{unique_name}.mp4")
-    with open(input_video_path, 'wb') as video_file:
-        video_file.write(video_data.content)
+        # Создаем уникальное имя для выходного файла
+        output_video_path = os.path.join(TEMP_FILES_DIR, f'{file_info.file_id}_output.mp4')
 
-    output_video_path = os.path.join(TEMP_FOLDER, f"round_video_{unique_name}.mp4")
-    await bot.send_message(message.chat.id, "Идёт сжатие видео...")
-    output_video_path = await make_round_video(input_video_path, output_video_path)
-    await bot.send_message(message.chat.id, "Сжатие выполнено. Отправляю результат.")
+        # Преобразуем видео
+        final_video_path = convert_video(input_video_path, output_video_path)
 
-    with open(output_video_path, 'rb') as video:
-        try:
-            await bot.send_video_note(message.chat.id, video)
-            await bot.send_message(message.chat.id, "Если захотите преобразовать ещё одно видео, то присылайте мне.")
-        except Exception:
-            await bot.send_message(message.chat.id, "Извините, проблемы с файлом. Отправьте другое видео.")
+        # Отправляем обработанное видео как видеосообщение
+        with open(final_video_path, 'rb') as video:
+            bot.send_video_note(message.chat.id, video)
 
-    os.remove(input_video_path)
-    if os.path.exists(output_video_path):
-        os.remove(output_video_path)
+        # Удаляем временные файлы
+        os.remove(input_video_path)
+        os.remove(final_video_path)
 
-if __name__ == '__main__':
-    import asyncio
+    except Exception as e:
+        print(f"Ошибка при обработке видео: {e}")
+        bot.reply_to(message, "Произошла ошибка при обработке видео.")
 
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(bot.polling())
+
+# Запуск бота
+print("Бот запущен...")
+bot.polling(non_stop=True)
