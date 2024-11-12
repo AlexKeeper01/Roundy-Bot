@@ -90,8 +90,11 @@ def handle_video(message):
         bot.send_message(message.chat.id, "Отправь мне ещё видео, если захочешь.")
 
     except Exception as e:
+        if 'file is too big' in str(e):
+            bot.reply_to(message, "Произошла ошибка при обработке видео. Файл слишком большой.")
+        else:
+            bot.reply_to(message, "Произошла ошибка при обработке видео.")
         print(f"Ошибка при обработке видео: {e}")
-        bot.reply_to(message, "Произошла ошибка при обработке видео.")
 
     try:
         os.remove(input_video_path)
